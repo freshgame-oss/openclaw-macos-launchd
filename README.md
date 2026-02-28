@@ -1,4 +1,4 @@
-# OpenClaw macOS Launchd 部署方案
+# OpenClaw macOS 最小化自愈网关
 
 > OpenClaw Gateway macOS 开机自启 + 崩溃自愈部署方案
 
