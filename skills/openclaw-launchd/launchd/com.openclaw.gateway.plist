@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.openclaw.gateway</string>
+    <key>ProgramArguments</key>
+    <array>
+    OPENCLAW_BIN=$(which openclaw)
+if [ -z "$OPENCLAW_BIN" ]; then
+  log "❌ openclaw CLI 未找到"
+  exit 1
+fi
+
+# 替换占位符
+sed -i '' "s|/opt/homebrew/bin/openclaw|$OPENCLAW_BIN|g" "$plist"
+        <string>gateway</string>
+        <string>start</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/minibot/.openclaw/logs/gateway.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/minibot/.openclaw/logs/gateway.stderr.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
