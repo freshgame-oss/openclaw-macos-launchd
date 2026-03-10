@@ -1,72 +1,96 @@
 #!/bin/bash
-# ~/.openclaw/watchdog.sh - OpenClaw macOS 看门狗
+# ~/.openclaw/scripts/monitor-gateway.sh - OpenClaw Gateway 监控脚本 (优化版)
 
-LOG_FILE="$HOME/.openclaw/logs/watchdog.log"
 MAX_FAILURES=3
-FAILURE_WINDOW=300  # 5分钟
+FAILURE_WINDOW=300  # 5分钟窗口
 CHECK_INTERVAL=60   # 每60秒检查一次
+
+LOG_FILE="$HOME/.openclaw/logs/gateway-monitor.log"
+FAILURE_FILE="$HOME/.openclaw/logs/failure-count"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
 check_gateway() {
+  # 方法1: 检查进程
   if pgrep -f "openclaw-gateway" > /dev/null 2>&1; then
     return 0
-  else
-    return 1
   fi
-}
-
-record_failure() {
-  echo "$(date +%s)" >> "$HOME/.openclaw/logs/failures.tmp"
-}
-
-get_recent_failures() {
-  local now=$(date +%s)
-  local cutoff=$((now - FAILURE_WINDOW))
   
-  # 清理过期记录
-  if [ -f "$HOME/.openclaw/logs/failures.tmp" ]; then
-    awk -v cutoff="$cutoff" '$1 > cutoff' "$HOME/.openclaw/logs/failures.tmp" > "$HOME/.openclaw/logs/failures.tmp.new"
-    mv "$HOME/.openclaw/logs/failures.tmp.new" "$HOME/.openclaw/logs/failures.tmp"
-    wc -l < "$HOME/.openclaw/logs/failures.tmp"
+  # 方法2: 检查 API 响应 (更可靠)
+  if curl -s --max-time 3 http://127.0.0.1:18789/health > /dev/null 2>&1; then
+    return 0
+  fi
+  
+  return 1
+}
+
+get_failure_count() {
+  if [ -f "$FAILURE_FILE" ]; then
+    local last_time=$(cat "$FAILURE_FILE" | head -1)
+    local now=$(date +%s)
+    # 超过窗口期，重置计数
+    if [ $((now - last_time)) -gt $FAILURE_WINDOW ]; then
+      echo "0"
+    else
+      cat "$FAILURE_FILE" | tail -1
+    fi
   else
     echo "0"
   fi
 }
 
+record_failure() {
+  local now=$(date +%s)
+  echo "$now" > "$FAILURE_FILE"
+  local count=$(get_failure_count)
+  echo "$((count + 1))" >> "$FAILURE_FILE"
+}
+
 trigger_fix() {
   log "⚠️ 连续失败 $MAX_FAILURES 次，触发 auto-fix..."
-  bash "$HOME/.openclaw/auto-fix.sh" 2>&1 | tee -a "$HOME/.openclaw/logs/auto-fix.log"
+  if [ -f "$HOME/.openclaw/scripts/auto-fix.sh" ]; then
+    bash "$HOME/.openclaw/scripts/auto-fix.sh" 2>&1 | tee -a "$HOME/.openclaw/logs/auto-fix.log"
+  else
+    log "❌ auto-fix.sh 不存在，跳过"
+  fi
 }
 
 fix_and_restart() {
-  log "Gateway 未运行，尝试重启..."
-  openclaw gateway start
-  sleep 5
+  local failures=$(get_failure_count)
+  log "⚠️ Gateway 检查失败 (连续失败: $failures 次)"
+  
+  if [ "$failures" -ge "2" ]; then
+    log "🔧 尝试重启 Gateway..."
+    openclaw gateway restart 2>&1 | tee -a "$LOG_FILE"
+    sleep 8
+  fi
   
   if check_gateway; then
-    log "✅ 重启成功"
-    > "$HOME/.openclaw/logs/failures.tmp"  # 清空失败记录
+    log "✅ Gateway 恢复运行"
+    # 重置计数
+    rm -f "$FAILURE_FILE"
   else
-    log "❌ 重启失败"
     record_failure
+    local new_count=$(get_failure_count)
     
-    local failures=$(get_recent_failures)
-    if [ "$failures" -ge "$MAX_FAILURES" ]; then
+    if [ "$new_count" -ge "$MAX_FAILURES" ]; then
       trigger_fix
+      rm -f "$FAILURE_FILE"  # 重置
+    else
+      log "⏳ 等待下次检查... ($new_count/$MAX_FAILURES)"
     fi
   fi
 }
 
-# 主逻辑
 main() {
   log "==== 检查开始 ===="
   
   if check_gateway; then
     log "✅ Gateway 运行正常"
-    [ -f "$HOME/.openclaw/logs/failures.tmp" ] && > "$HOME/.openclaw/logs/failures.tmp"
+    # 正常时清理失败记录
+    [ -f "$FAILURE_FILE" ] && rm -f "$FAILURE_FILE"
   else
     fix_and_restart
   fi
