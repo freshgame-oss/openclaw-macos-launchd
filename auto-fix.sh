@@ -1,59 +1,53 @@
 #!/bin/bash
-# ~/.openclaw/auto-fix.sh - OpenClaw 自愈修复脚本
+# ~/.openclaw/auto-fix.sh - manual recovery helper for launchd-managed gateway
+
+set -u
 
 LOG_FILE="$HOME/.openclaw/logs/auto-fix.log"
+ERR_LOG="$HOME/.openclaw/logs/gateway.err.log"
+OUT_LOG="$HOME/.openclaw/logs/gateway.log"
+LEGACY_ERR_LOG="$HOME/.openclaw/logs/gateway.stderr.log"
+LEGACY_OUT_LOG="$HOME/.openclaw/logs/gateway.stdout.log"
+LABEL="${OPENCLAW_LAUNCHD_LABEL:-ai.openclaw.gateway}"
+DOMAIN="gui/$(id -u)"
+SERVICE_TARGET="$DOMAIN/$LABEL"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
-log "========== 开始自愈修复 =========="
+log "========== 开始诊断与恢复 =========="
 
-# 1. 收集错误日志
-log "收集最近错误日志..."
-if [ -f "$HOME/.openclaw/logs/gateway.stderr.log" ]; then
-  tail -50 "$HOME/.openclaw/logs/gateway.stderr.log" >> "$LOG_FILE" 2>&1
-fi
-
-# 2. 检查 openclaw CLI
-if ! command -v openclaw &> /dev/null; then
+if ! command -v openclaw >/dev/null 2>&1; then
   log "❌ openclaw CLI 未找到"
   exit 1
 fi
 
-# 3. 尝试 Claude Code 修复 (如果可用, 30秒超时)
-if command -v claude &> /dev/null; then
-  log "调用 Claude Code 进行诊断..."
-  # 只做简单诊断，不做自动修复（太危险）
-  DIAG_RESULT=$(timeout 30 claude -p "OpenClaw Gateway 启动失败，请给出3个最可能的原因和修复步骤:" --max-turns 1 2>&1 | head -20)
-  log "诊断结果: $DIAG_RESULT"
-fi
+log "检查 launchd 服务状态..."
+launchctl print "$SERVICE_TARGET" >> "$LOG_FILE" 2>&1 || log "⚠️ 无法读取 $SERVICE_TARGET 状态"
 
-# 4. 强制杀死可能残留的进程
-log "清理残留进程..."
-pkill -f "openclaw-gateway" 2>/dev/null || true
-sleep 2
+log "收集最近错误日志..."
+[ -f "$ERR_LOG" ] && tail -50 "$ERR_LOG" >> "$LOG_FILE" 2>&1
+[ -f "$OUT_LOG" ] && tail -50 "$OUT_LOG" >> "$LOG_FILE" 2>&1
+[ -f "$LEGACY_ERR_LOG" ] && tail -50 "$LEGACY_ERR_LOG" >> "$LOG_FILE" 2>&1
+[ -f "$LEGACY_OUT_LOG" ] && tail -50 "$LEGACY_OUT_LOG" >> "$LOG_FILE" 2>&1
 
-# 5. 重启 Gateway
-log "重启 Gateway..."
-openclaw gateway start
-sleep 5
+log "运行 doctor 修复配置..."
+openclaw doctor --fix >> "$LOG_FILE" 2>&1 || true
 
-# 6. 验证
-if pgrep -f "openclaw-gateway" > /dev/null 2>&1; then
-  log "✅ 自愈成功"
-  
-  # 可选: 发送通知
-  if [ -n "$OPENCLAW_FIX_NOTIFY" ]; then
-    log "发送通知到: $OPENCLAW_FIX_NOTIFY"
-  fi
+log "通过 launchd 执行重启..."
+if launchctl kickstart -k "$SERVICE_TARGET" >> "$LOG_FILE" 2>&1; then
+  sleep 3
 else
-  log "❌ 自愈失败，请人工介入"
-  
-  # 输出完整日志供调试
-  log "--- 完整日志 ---"
-  cat "$HOME/.openclaw/logs/gateway.stderr.log" >> "$LOG_FILE" 2>&1 || true
-  cat "$HOME/.openclaw/logs/gateway.stdout.log" >> "$LOG_FILE" 2>&1 || true
+  log "❌ launchctl kickstart 执行失败"
+  exit 1
 fi
 
-log "========== 自愈修复结束 =========="
+if launchctl print "$SERVICE_TARGET" 2>/dev/null | rg -q "state = running"; then
+  log "✅ 恢复成功，launchd 服务已运行"
+else
+  log "❌ 恢复失败，请查看日志输出"
+  exit 1
+fi
+
+log "========== 诊断与恢复结束 =========="
